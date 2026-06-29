@@ -1,0 +1,9 @@
+# credentials — never commit
+kalshi.config.json
+*.pem
+*.key
+
+# build artifacts
+/kalshi
+/kalshi.exe
+/dist/

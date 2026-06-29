@@ -1,0 +1,5 @@
+{
+  "keyId": "your-kalshi-api-key-id",
+  "pemPath": "kalshi.pem",
+  "defaultEnv": "demo"
+}
