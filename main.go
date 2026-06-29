@@ -314,10 +314,15 @@ func cmdBalance(args []string) {
 		return
 	}
 	var b struct {
-		Balance int `json:"balance"`
+		BalanceDollars string `json:"balance_dollars"`
+		Balance        int    `json:"balance"`
 	}
 	json.Unmarshal(data, &b)
-	fmt.Printf("[%s] balance: %s\n", strings.ToUpper(env), dollars(b.Balance))
+	out := dollars(b.Balance) // fallback to legacy integer-cents field
+	if b.BalanceDollars != "" {
+		out = fmt.Sprintf("$%.2f", num(b.BalanceDollars))
+	}
+	fmt.Printf("[%s] balance: %s\n", strings.ToUpper(env), out)
 }
 
 func cmdMarkets(args []string) {
