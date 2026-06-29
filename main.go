@@ -516,62 +516,75 @@ func cmdPositions(args []string) {
 	printJSON(data)
 }
 
+// orderReq is the body for POST /portfolio/events/orders (Kalshi V2 single-book).
+// Orders are expressed on the YES leg only.
 type orderReq struct {
-	Ticker        string `json:"ticker"`
-	ClientOrderID string `json:"client_order_id"`
-	Action        string `json:"action"`
-	Side          string `json:"side"`
-	Count         int    `json:"count"`
-	Type          string `json:"type"`
-	YesPrice      int    `json:"yes_price,omitempty"`
-	NoPrice       int    `json:"no_price,omitempty"`
-	BuyMaxCost    int    `json:"buy_max_cost,omitempty"`
+	Ticker                  string `json:"ticker"`
+	ClientOrderID           string `json:"client_order_id"`
+	Side                    string `json:"side"`  // "bid" = buy YES, "ask" = sell YES
+	Count                   string `json:"count"` // fixed-point string, e.g. "77.00"
+	Price                   string `json:"price"` // fixed-point dollars, e.g. "0.6300"
+	TimeInForce             string `json:"time_in_force"`
+	SelfTradePreventionType string `json:"self_trade_prevention_type"`
+	PostOnly                bool   `json:"post_only"`
+	CancelOrderOnPause      bool   `json:"cancel_order_on_pause"`
+	ReduceOnly              bool   `json:"reduce_only"`
+	Subaccount              int    `json:"subaccount"`
 }
 
+func normalizeTIF(s string) (string, error) {
+	switch s {
+	case "gtc", "good_till_canceled":
+		return "good_till_canceled", nil
+	case "ioc", "immediate_or_cancel":
+		return "immediate_or_cancel", nil
+	case "fok", "fill_or_kill":
+		return "fill_or_kill", nil
+	}
+	return "", fmt.Errorf("invalid --tif %q (use gtc|ioc|fok)", s)
+}
+
+// placeOrder posts to the V2 single-book endpoint /portfolio/events/orders.
+// The order is expressed on the YES leg: buy => side "bid", sell => side "ask".
 func placeOrder(action string, args []string) {
 	fs := flag.NewFlagSet(action, flag.ExitOnError)
 	c := addCommon(fs)
-	yes := fs.Bool("yes", false, "trade the YES side (default)")
-	no := fs.Bool("no", false, "trade the NO side")
-	price := fs.Int("price", 0, "limit price in cents (1-99); required for limit orders")
-	otype := fs.String("type", "limit", "order type: limit|market")
+	price := fs.Int("price", 0, "price in cents (1-99) on the YES leg (required)")
+	tif := fs.String("tif", "good_till_canceled", "time in force: gtc|ioc|fok")
+	stp := fs.String("stp", "taker_at_cross", "self-trade prevention: taker_at_cross|maker")
+	postOnly := fs.Bool("post-only", false, "post-only (maker) order")
+	reduceOnly := fs.Bool("reduce-only", false, "reduce-only order")
 	pos := parseArgs(fs, args)
 	if len(pos) < 2 {
-		die(fmt.Errorf("usage: kalshi %s <ticker> <count> [--yes|--no] [--price ¢] [--type limit|market]", action))
+		die(fmt.Errorf("usage: kalshi %s <ticker> <count> --price <cents> [--tif gtc|ioc|fok] [--post-only] [--reduce-only]", action))
 	}
 	ticker := pos[0]
-	count, err := strconv.Atoi(pos[1])
-	if err != nil || count < 1 {
-		die(errors.New("count must be a positive integer"))
+	count, err := strconv.ParseFloat(pos[1], 64)
+	if err != nil || count <= 0 {
+		die(errors.New("count must be a positive number (up to 2 decimals)"))
 	}
-	side := "yes"
-	if *no {
-		side = "no"
+	if *price < 1 || *price > 99 {
+		die(errors.New("--price must be between 1 and 99 (cents on the YES leg)"))
 	}
-	if *yes && *no {
-		die(errors.New("pass only one of --yes / --no"))
+	tifVal, err := normalizeTIF(*tif)
+	if err != nil {
+		die(err)
 	}
-	if *otype == "limit" && (*price < 1 || *price > 99) {
-		die(errors.New("limit orders need --price between 1 and 99 (cents)"))
+	side := "bid" // buy YES
+	if action == "sell" {
+		side = "ask" // sell YES
 	}
 
 	ord := orderReq{
-		Ticker:        ticker,
-		ClientOrderID: clientOrderID(),
-		Action:        action,
-		Side:          side,
-		Count:         count,
-		Type:          *otype,
-	}
-	if *otype == "limit" {
-		if side == "yes" {
-			ord.YesPrice = *price
-		} else {
-			ord.NoPrice = *price
-		}
-	} else if action == "buy" {
-		// market buy requires a spending cap; cap at the theoretical max ($1/contract).
-		ord.BuyMaxCost = count * 100
+		Ticker:                  ticker,
+		ClientOrderID:           clientOrderID(),
+		Side:                    side,
+		Count:                   fmt.Sprintf("%.2f", count),
+		Price:                   fmt.Sprintf("%.4f", float64(*price)/100),
+		TimeInForce:             tifVal,
+		SelfTradePreventionType: *stp,
+		PostOnly:                *postOnly,
+		ReduceOnly:              *reduceOnly,
 	}
 
 	cl, env, err := newClient(c)
@@ -584,7 +597,9 @@ func placeOrder(action string, args []string) {
 	}
 	body, _ := json.MarshalIndent(ord, "", "  ")
 	fmt.Printf("======== ENV=%s  MODE=%s ========\n", strings.ToUpper(env), mode)
-	fmt.Printf("POST %s%s/portfolio/orders\n%s\n", baseFor(env), apiPrefix, string(body))
+	fmt.Printf("%s YES  %s contracts @ %d¢  (side=%s, tif=%s)\n",
+		strings.ToUpper(action), ord.Count, *price, side, tifVal)
+	fmt.Printf("POST %s%s/portfolio/events/orders\n%s\n", baseFor(env), apiPrefix, string(body))
 
 	if !c.confirm {
 		fmt.Println("\n(dry-run) nothing sent. Re-run with --confirm to place this order.")
@@ -593,7 +608,7 @@ func placeOrder(action string, args []string) {
 		}
 		return
 	}
-	data, err := cl.do("POST", "/portfolio/orders", nil, ord)
+	data, err := cl.do("POST", "/portfolio/events/orders", nil, ord)
 	if err != nil {
 		die(err)
 	}
@@ -614,11 +629,11 @@ func cmdCancel(args []string) {
 		die(err)
 	}
 	if !c.confirm {
-		fmt.Printf("[%s] DRY-RUN: would DELETE /portfolio/orders/%s\nRe-run with --confirm to cancel.\n",
+		fmt.Printf("[%s] DRY-RUN: would DELETE /portfolio/events/orders/%s\nRe-run with --confirm to cancel.\n",
 			strings.ToUpper(env), id)
 		return
 	}
-	data, err := cl.do("DELETE", "/portfolio/orders/"+id, nil, nil)
+	data, err := cl.do("DELETE", "/portfolio/events/orders/"+id, nil, nil)
 	if err != nil {
 		die(err)
 	}
@@ -638,9 +653,9 @@ Read (safe):
   orders [--status resting]    your orders
   positions                    your positions
 
-Write (gated: dry-run unless --confirm; demo unless --prod):
-  buy  <ticker> <count> [--yes|--no] [--price ¢] [--type limit|market]
-  sell <ticker> <count> [--yes|--no] [--price ¢] [--type limit|market]
+Write (V2 single-book, YES leg; gated: dry-run unless --confirm; demo unless --prod):
+  buy  <ticker> <count> --price ¢ [--tif gtc|ioc|fok] [--post-only] [--reduce-only]   # side=bid (buy YES)
+  sell <ticker> <count> --price ¢ [--tif gtc|ioc|fok] [--post-only] [--reduce-only]   # side=ask (sell YES)
   cancel <order_id>
 
 Global flags: --prod  --demo  --confirm  --raw  --config <path>
@@ -649,8 +664,8 @@ Examples:
   kalshi status
   kalshi balance --prod
   kalshi book KXLOLMAP-26JUN282300KCT1-3-T1 --prod
-  kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --yes --price 78 --prod         # dry-run
-  kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --yes --price 78 --prod --confirm # LIVE
+  kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --price 78 --prod            # dry-run
+  kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --price 78 --prod --confirm  # LIVE
 `)
 }
 

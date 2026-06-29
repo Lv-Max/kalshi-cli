@@ -66,13 +66,20 @@ kalshi orders --status resting                  # your open orders
 kalshi positions                                # your positions
 ```
 
-Write commands (gated — see below):
+Write commands (gated — see below). Orders use Kalshi's **V2 single-book model**:
+everything is expressed on the **YES leg** — `buy` = `side:"bid"` (buy YES),
+`sell` = `side:"ask"` (sell YES). There is no separate order type; every order has
+an explicit price.
 
 ```sh
-kalshi buy  <ticker> <count> [--yes|--no] [--price <cents>] [--type limit|market]
-kalshi sell <ticker> <count> [--yes|--no] [--price <cents>] [--type limit|market]
+kalshi buy  <ticker> <count> --price <cents> [--tif gtc|ioc|fok] [--post-only] [--reduce-only]
+kalshi sell <ticker> <count> --price <cents> [--tif gtc|ioc|fok] [--post-only] [--reduce-only]
 kalshi cancel <order_id>
 ```
+
+- `<count>` may be fractional (e.g. `1`, `77`, `1.5`).
+- `--price` is the YES-leg price in cents (1–99).
+- `--tif` default `gtc` (good-till-canceled); `ioc` / `fok` take liquidity immediately.
 
 Global flags: `--prod` `--demo` `--confirm` `--raw` `--config <path>`
 (`--raw` prints the raw JSON response of any command).
@@ -86,14 +93,15 @@ Global flags: `--prod` `--demo` `--confirm` `--raw` `--config <path>`
 
 ```sh
 # preview only (prints the order body, sends nothing):
-kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --yes --price 78 --prod
+kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --price 78 --prod
 # actually places a real order:
-kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --yes --price 78 --prod --confirm
+kalshi buy KXLOLMAP-26JUN282300KCT1-3-T1 1 --price 78 --prod --confirm
 ```
 
 ## Notes
 
-- Prices are in cents (1–99). `count` is whole contracts.
+- Prices are in cents (1–99); `count` may be fractional (up to 2 decimals).
+- Orders use the V2 endpoints: create `POST /portfolio/events/orders`, cancel `DELETE /portfolio/events/orders/{id}`. (The legacy `/portfolio/orders` returns HTTP 410 `deprecated_v1_order_endpoint`.)
 - Base URLs: production `https://api.elections.kalshi.com/trade-api/v2`,
   demo `https://external-api.demo.kalshi.co/trade-api/v2`.
 - Flags may appear before or after positional arguments.
